@@ -1,0 +1,17 @@
+version: '3'
+services:
+  collei:
+    container_name: collei
+    image: ghcr.io/c4em/collei:latest
+    environment:
+      - GENSHIN_COOKIES=YOUR_COOKIES
+      # - STARRAIL_COOKIES=YOUR_COOKIES
+      # - SKIP_DAILY=true 
+      # - SKIP_CODE=true 
+
+  scheduler:
+    container_name: collei-scheduler
+    image: docker:cli
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
+    command: ["/bin/sh", "-c", "while true; do sleep 21600; docker restart collei; done"]
+    restart: unless-stopped

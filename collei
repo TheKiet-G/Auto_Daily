@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+
+import os
+import http
+import sys
+import asyncio
+import genshin
+import requests
+from random import randrange
+from bs4 import BeautifulSoup
+
+
+async def main():
+    genshin_key = "GENSHIN_COOKIES"
+    genshin_name = "Genshin Impact"
+    genshin_cookies = get_cookies(genshin_key, genshin_name)
+    genshin_status = None
+    if (genshin_cookies is not None):
+        genshin_status = await claim(genshin_cookies, genshin_name)
+
+    hsr_key = "STARRAIL_COOKIES"
+    hsr_name = "Honkai Star Rail"
+    hsr_cookies = get_cookies(hsr_key, hsr_name)
+    hsr_status = None
+    if (hsr_cookies is not None):
+        hsr_status = await claim(hsr_cookies, hsr_name)
+
+    if (hsr_cookies is None and genshin_cookies is None):
+        print("No cookies are set. Please read the Readme for instructions.",
+              file=sys.stderr)
+        await asyncio.sleep(0)
+        exit(1)
+
+    if (hsr_status is not None and hsr_status is not True
+            or genshin_status is not None and genshin_status is not True):
+        exit(1)
+
+
+def get_cookies(key: str, name: str) -> dict:
+    cookies_raw = os.environ.get(key)
+    if (cookies_raw is None or len(str(cookies_raw)) < 0
+            or cookies_raw == "YOUR_COOKIES"):
+        print(f"Skipping {name} routine as no cookies are set.")
+        return None
+    else:
+        cookies = {
+            "ltuid": extract_cookie("ltuid", cookies_raw),
+            "ltoken": extract_cookie("ltoken", cookies_raw),
+            "cookie_token_v2": extract_cookie("cookie_token_v2", cookies_raw),
+            "account_mid_v2": extract_cookie("cookie_mid_v2", cookies_raw),
+            "account_id_v2": extract_cookie("account_id_v2", cookies_raw),
+        }
+        if cookies["ltuid"] == "" and cookies["ltoken"] == "" \
+                and cookies["account_id_v2"] == "":
+            print("Provided cookies are invalid.", file=sys.stderr)
+            return None
+        return cookies
+
+
+def extract_cookie(key: str, cookies: str) -> str:
+    try:
+        index = cookies.index(f"{key}=")
+    except Exception as _:
+        _
+        return ""
+
+    index += len(f"{key}=")
+
+    end = cookies.find(";", index)
+    if end == -1:
+        value = cookies[index:]
+    else:
+        value = cookies[index:end]
+    return value
+
+
+async def claim(cookies: http.cookies, name: str) -> bool:
+    print(f"Running routine for {name}")
+    try:
+        if (name == "Genshin Impact"):
+            client = genshin.Client(cookies, debug=False,
+                                    game=genshin.Game.GENSHIN)
+        else:
+            client = genshin.Client(cookies, debug=False,
+                                    game=genshin.Game.STARRAIL)
+    except Exception as e:
+        print(f"Could not log in to {name}: {e}", file=sys.stderr)
+        await asyncio.sleep(0)
+        return False
+
+    daily_status = await claim_daily(client, name)
+    if cookies["cookie_token_v2"] != "":
+        code_status = await claim_codes(client, name)
+    else:
+        print("The cookie_token_v2 is missing for claiming codes. Please read the README.md to learn how to add it.", file=sys.stderr)
+        return False
+
+    if (daily_status is not True or code_status is not True):
+        return False
+    else:
+        return True
+
+
+async def claim_daily(client: genshin.Client, name: str) -> bool:
+    skip_daily = os.environ.get("SKIP_DAILY")
+    if (skip_daily is None or len(str(skip_daily)) == 0):
+        print(f"Claiming daily check-in rewards for {name}")
+        try:
+            await client.claim_daily_reward()
+            print("Successfully claimed daily check-in rewards for {name}")
+            await asyncio.sleep(0)
+            return True
+        except genshin.AlreadyClaimed:
+            print(f"Daily check-in rewards for {name} have already"
+                  "been claimed today.")
+            await asyncio.sleep(0)
+            return True
+        except genshin.GeetestTriggered:
+            print("Please read: https://github.com/c4em/collei/#geetest"
+                  "-triggered-during-daily-reward-claim", file=sys.stderr)
+            await asyncio.sleep(0)
+            return False
+        except Exception as e:
+            print(f"Could not claim daily check-in rewards for {name}: {e}",
+                  file=sys.stderr)
+            await asyncio.sleep(0)
+            return False
+    else:
+        print("Skipping daily check-in for {name}")
+        await asyncio.sleep(0)
+        return True
+
+
+async def claim_codes(client: genshin.Client, name: str) -> bool:
+    skip_codes = os.environ.get("SKIP_CODES")
+    if (skip_codes is None or len(str(skip_codes)) == 0):
+        if name == "Genshin Impact":
+            file = "genshin_codes.txt"
+        else:
+            file = "starrail_codes.txt"
+
+        codes = load_codes(file)
+        new_codes = await fetch_codes(name)
+        if new_codes is None:
+            return False
+
+        codes = await redeem_codes(new_codes, codes, client)
+        save_codes(codes, file)
+
+        return True
+    else:
+        print("Skipping codes for {name}")
+        await asyncio.sleep(0)
+        return True
+
+
+def load_codes(file: str) -> list[str]:
+    if not os.path.exists(file):
+        os.mknod(file)
+        return []
+    with open(file, "r") as file:
+        return file.readlines()
+
+
+async def fetch_codes(name: str) -> list[str]:
+    if name == "Genshin Impact":
+        url = "https://genshin-impact.fandom.com/wiki/Promotional_Code"
+    else:
+        url = "https://honkai-star-rail.fandom.com/wiki/Redemption_Code"
+    try:
+        res = requests.get(url)
+        return parse_codes(res.text)
+    except Exception as e:
+        print(f"Could not fetch and parse codes for {name}: {e}")
+        await asyncio.sleep(0)
+        return None
+
+
+def parse_codes(html: str) -> list[str]:
+    soup = BeautifulSoup(html, "html.parser")
+    codes = []
+    for tr in soup.find("table").findAll("tr"):
+        tds = tr.findAll("td")
+        for i, td in enumerate(tds):
+            code = str(td.find("code"))
+            if code != "None":
+                if "Expired:" in str(tds[i+3]):
+                    continue
+                codes.append(code[code.find('>')+1:code.find('</')])
+    return codes
+
+
+async def redeem_codes(new_codes: list[str], codes: list[str],
+                       client: genshin.Client) -> list[str]:
+    for code in new_codes:
+        if code+"\n" not in codes:
+            print(f"Redeeming code: {code}")
+            await asyncio.sleep(0)
+            try:
+                await client.redeem_code(code)
+                codes.append(code)
+            except genshin.RedemptionClaimed:
+                print(f"Code {code} has already been claimed")
+                await asyncio.sleep(0)
+                codes.append(code)
+            except Exception as e:
+                print(f"Could not redeem code {code}: {e}", file=sys.stderr)
+                await asyncio.sleep(0)
+            finally:
+                timeout = 5 + randrange(5)
+                print(f"Sleeping for {timeout}s")
+                await asyncio.sleep(0)
+                await asyncio.sleep(timeout)
+    return codes
+
+
+def save_codes(codes: list[str], file: str) -> bool:
+    try:
+        with open(file, "w") as fp:
+            for code in codes:
+                if code[-1] != "\n":
+                    code += "\n"
+                fp.write(code)
+        return True
+    except Exception as e:
+        print(f"Could not write codes to {file}: {e}", file=sys.stderr)
+        return False
+
+
+if __name__ == '__main__':
+    asyncio.run(main())
